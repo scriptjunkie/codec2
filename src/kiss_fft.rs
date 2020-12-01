@@ -238,8 +238,8 @@ fn kf_bfly_generic(
             Fout[k] = scratch[0];
             for q in 1..p {
                 twidx += fstride * k;
-                if twidx >= Norig as usize {
-                    twidx -= Norig as usize;
+                if twidx >= Norig {
+                    twidx -= Norig;
                 }
                 let t = C_MUL(&scratch[q], &st.twiddles[twidx]);
                 C_ADDTO(&mut Fout[k], &t);
@@ -254,11 +254,11 @@ fn kf_work(
     mut f: &[kiss_fft_cpx],
     fstride: usize,
     in_stride: i32,
-    factors: &[i32],
+    factors: &[usize],
     st: &kiss_fft_cfg,
 ) {
-    let p = factors[0] as usize; /* the radix  */
-    let m = factors[1] as usize; /* stage's fft length/p */
+    let p = factors[0]; /* the radix  */
+    let m = factors[1]; /* stage's fft length/p */
     if m == 1 {
         for fout_idx in 0..p * m {
             Fout[fout_idx] = f[0];
@@ -319,7 +319,7 @@ pub fn kiss_fftr(st: &mut kiss_fftr_cfg, timedata: &[f32], freqdata: &mut [kiss_
     /* input buffer timedata is stored row-wise */
     //    assert(st.substate.inverse==0);
 
-    let ncfft = st.substate.nfft as usize;
+    let ncfft = st.substate.nfft;
 
     /*perform the parallel fft of two real signals packed in real,imag*/
     //could transmute this but UGH so we copy
@@ -375,7 +375,7 @@ pub fn kiss_fftri(st: &mut kiss_fftr_cfg, freqdata: &[kiss_fft_cpx], timedata: &
     /* input buffer timedata is stored row-wise */
     //   assert(st.substate.inverse == 1);
 
-    let ncfft = st.substate.nfft as usize;
+    let ncfft = st.substate.nfft;
 
     st.tmpbuf[0].r = freqdata[0].r + freqdata[ncfft].r;
     st.tmpbuf[0].i = freqdata[0].r - freqdata[ncfft].r;

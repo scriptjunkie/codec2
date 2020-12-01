@@ -257,7 +257,7 @@ fn fdmdv_16_to_8(out8k: &mut [f32], in16k: &mut [f32], in16koff: usize, n: i32) 
 pub fn nlp(
     nlp: &mut NLP,
     Sn: &[f32],        /* input speech vector                                */
-    n: i32,            /* frames shift (no. new samples in Sn[])             */
+    mut n: usize,      /* frames shift (no. new samples in Sn[])             */
     pitch: &mut f32,   /* estimated pitch period in samples at current Fs    */
     _Sw: &[COMP],      /* Freq domain version of Sn[]                        */
     _W: &[f32],        /* Freq domain window                                 */
@@ -268,8 +268,7 @@ pub fn nlp(
     //    PROFILE_VAR(start, tnotch, filter, peakpick, window, fft, magsq, shiftmem);
     //    assert(nlp_state != NULL);
     //    nlp = (NLP*)nlp_state;
-    let mut m = nlp.m as usize;
-    let mut n = n as usize;
+    let mut m = nlp.m;
 
     /* Square, notch filter at DC, and LP filter vector */
 

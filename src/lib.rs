@@ -1,20 +1,21 @@
 //! Codec 2 is an open source (LGPL 2.1) low bit rate speech codec.
 //!
-//! This is a pure rust port of the original [http://rowetel.com/codec2.html](http://rowetel.com/codec2.html)
-//! Currently 3200 bitrate encoding and decoding is implemented.
+//! This is a zero dependencies pure rust port of the original [http://rowetel.com/codec2.html](http://rowetel.com/codec2.html)
+//! Currently 3200 and 2400 bitrates encoding and decoding are implemented.
 //!
 //! # Basic Usage
 //!
-//! Create a Codec2 object (`Codec2::new(Codec2Mode::MODE_3200)`) then repeatedly obtain 8khz
-//! 16-bit raw audio samples and call `encode` to encode blocks of 160 samples into an 8-byte
-//! (64-bit) compressed form, in order. On the receiving end, create a Codec2 object and repeatedly
-//! call `decode` to decompress each chunk of 8 received bytes into the next 160 samples.
+//! Create a Codec2 object e.g. `Codec2::new(Codec2Mode::MODE_3200)` then repeatedly obtain raw 8khz
+//! 16-bit audio samples and call `encode` to encode blocks of `samples_per_frame()` samples into
+//! `bits_per_frame()` compressed bits, in order. On the receiving end, create a Codec2 object and
+//! repeatedly call `decode` to decompress each chunk of received bytes into the next samples.
 //!
-//! Complete example below.
+//! Complete example below. This example uses zerocopy to interpret the `&[i16]` slices as `&[u8]`
+//! for I/O.
 //!
 //! Cargo.toml:
 //!
-//! ```text
+//! ```toml
 //! [dependencies]
 //! zerocopy = "0.3.0"
 //! codec2 = "0"
@@ -26,7 +27,7 @@
 //! use codec2::*;
 //! use std::env::args;
 //! use std::io::prelude::*;
-//! use zerocopy::LayoutVerified;
+//! use zerocopy::AsBytes;
 //!
 //! fn main() -> std::io::Result<()> {
 //!     if args().len() != 4 || (args().nth(1).unwrap() != "enc" && args().nth(1).unwrap() != "dec") {
@@ -37,19 +38,17 @@
 //!     let mut fin = std::fs::File::open(args().nth(2).unwrap())?;
 //!     let mut fout = std::fs::File::create(args().nth(3).unwrap())?;
 //!     let mut c2 = Codec2::new(Codec2Mode::MODE_3200);
-//!     let mut sampsbuf = vec![0; c2.samples_per_frame() * 2]; //u8 I/O buffer for 16-bit samples
+//!     let mut samps = vec![0; c2.samples_per_frame()]; //u16 I/O buffer
 //!     let mut packed = vec![0; (c2.bits_per_frame() + 7) / 8]; //u8 I/O buffer for encoded bits
 //!     if args().nth(1).unwrap() == "enc" {
-//!         while fin.read_exact(&mut sampsbuf).is_ok() {
-//!             let samps = LayoutVerified::new_slice(&sampsbuf[..]).expect("bad alignment"); //assumes samples are in correct endianness
+//!         while fin.read_exact(samps.as_bytes_mut()).is_ok() {
 //!             c2.encode(&mut packed, &samps[..]);
 //!             fout.write_all(&packed)?;
 //!         }
 //!     } else {
 //!         while fin.read_exact(&mut packed).is_ok() {
-//!             let mut samps = LayoutVerified::new_slice(&mut sampsbuf[..]).expect("bad alignment");
 //!             c2.decode(&mut samps[..], &packed);
-//!             fout.write_all(&sampsbuf)?;
+//!             fout.write_all(samps.as_bytes())?;
 //!         }
 //!     }
 //!     Ok(())
@@ -93,7 +92,7 @@ mod tests {
         assert_eq!(&outbuf[..], &[1, 0, 9, 0x43, 0x9C, 0xE4, 0x21, 8][..]);
         println!("encoded {:X?}", outbuf);
 
-        c2.codec2_decode_3200(&mut samps, &outbuforig);
+        c2.decode(&mut samps, &outbuforig);
         println!("decoded {:X?}", samps);
         for samp in &samps {
             assert!((*samp).abs() < 0x100);
@@ -106,11 +105,16 @@ mod nlp;
 use nlp::FDMDV_OS_TAPS_16K;
 mod quantise;
 use crate::quantise::*;
+mod codebook;
+use crate::codebook::*;
 mod codebookd;
 use crate::codebookd::*;
+mod codebookge;
+use crate::codebookge::*;
 const WO_BITS: i32 = 7;
+const WO_E_BITS: u32 = 8;
 const LSPD_SCALAR_INDEXES: usize = 10;
-
+const LSP_SCALAR_INDEXES: usize = 10;
 use std::f64::consts::PI;
 
 const N_S: f32 = 0.01; //  internal proc frame length in secs
@@ -129,30 +133,30 @@ mod inner {
     use crate::*;
     #[derive(Clone, Debug)]
     pub struct C2const {
-        pub Fs: i32,      //  sample rate of this instance
-        pub n_samp: i32,  //  number of samples per 10ms frame at Fs
-        pub max_amp: i32, //  maximum number of harmonics
-        pub m_pitch: i32, //  pitch estimation window size in samples
-        pub p_min: i32,   //  minimum pitch period in samples
-        pub p_max: i32,   //  maximum pitch period in samples
+        pub Fs: i32,       //  sample rate of this instance
+        pub n_samp: usize, //  number of samples per 10ms frame at Fs
+        //        pub max_amp: i32,   //  maximum number of harmonics
+        pub m_pitch: usize, //  pitch estimation window size in samples
+        pub p_min: i32,     //  minimum pitch period in samples
+        pub p_max: i32,     //  maximum pitch period in samples
         pub Wo_min: f32,
         pub Wo_max: f32,
-        pub nw: i32, //  analysis window size in samples
-        pub tw: i32, //  trapezoidal synthesis window overlap
+        pub nw: usize, //  analysis window size in samples
+        pub tw: usize, //  trapezoidal synthesis window overlap
     }
     impl C2const {
         pub fn new(Fs: i32, framelength_s: f32) -> Self {
             Self {
                 Fs: Fs,
-                n_samp: ((Fs as f32) * framelength_s).round() as i32,
-                max_amp: ((Fs as f32) * P_MAX_S / 2.0).floor() as i32,
+                n_samp: ((Fs as f32) * framelength_s).round() as usize,
+                //                max_amp: ((Fs as f32) * P_MAX_S / 2.0).floor() as i32,
                 p_min: ((Fs as f32) * P_MIN_S).floor() as i32,
                 p_max: ((Fs as f32) * P_MAX_S).floor() as i32,
-                m_pitch: ((Fs as f32) * M_PITCH_S).floor() as i32,
+                m_pitch: ((Fs as f32) * M_PITCH_S).floor() as usize,
                 Wo_min: TWO_PI / ((Fs as f32) * P_MAX_S).floor(),
                 Wo_max: TWO_PI / ((Fs as f32) * P_MIN_S).floor(),
                 nw: 279,
-                tw: ((Fs as f32) * TW_S) as i32,
+                tw: ((Fs as f32) * TW_S) as usize,
             }
         }
 
@@ -174,8 +178,8 @@ mod inner {
             Sn: &[f32],
             w: &[f32],
         ) {
-            let m_pitch = self.m_pitch as usize;
-            let nw = self.nw as usize;
+            let m_pitch = self.m_pitch;
+            let nw = self.nw;
 
             for i in 0..FFT_ENC {
                 Sw[i].r = 0.0;
@@ -204,9 +208,8 @@ mod inner {
     //  describes each codebook
     #[derive(Clone, Debug)]
     pub struct lsp_codebook {
-        pub k: i32,             //  dimension of vector
+        pub k: usize,           //  dimension of vector
         pub log2m: i32,         //  number of bits in m
-        pub m: i32,             //  elements in codebook
         pub cb: &'static [f32], //  The elements
     }
     #[derive(Copy, Clone)]
@@ -233,14 +236,14 @@ mod inner {
     pub type COMP = kiss_fft_cpx;
     #[derive(Clone, Debug)]
     pub struct kiss_fft_state {
-        pub nfft: i32,
+        pub nfft: usize,
         pub inverse: i32,
-        pub factors: [i32; 2 * MAXFACTORS],
+        pub factors: [usize; 2 * MAXFACTORS],
         pub twiddles: Vec<kiss_fft_cpx>,
     }
     impl kiss_fft_state {
-        pub fn new(nfft: i32, inverse_fft: i32) -> Self {
-            let mut twiddles = Vec::with_capacity(nfft as usize);
+        pub fn new(nfft: usize, inverse_fft: i32) -> Self {
+            let mut twiddles = Vec::with_capacity(nfft);
             let mut factors = [0; 2 * MAXFACTORS];
             for i in 0..nfft {
                 let mut phase = -2.0 * PI * (i as f64) / (nfft as f64);
@@ -251,7 +254,7 @@ mod inner {
             }
             let mut n = nfft;
             let mut p = 4;
-            let floor_sqrt = (n as f64).sqrt().floor() as i32;
+            let floor_sqrt = (n as f64).sqrt().floor() as usize;
             let mut idx = 0;
             // factor out powers of 4, powers of 2, then any remaining primes
             loop {
@@ -289,14 +292,14 @@ mod inner {
         pub super_twiddles: Vec<kiss_fft_cpx>,
     }
     impl kiss_fftr_state {
-        pub fn new(mut nfft: i32, inverse_fft: i32) -> Self {
+        pub fn new(mut nfft: usize, inverse_fft: i32) -> Self {
             nfft = nfft / 2;
             let mut res = Self {
                 substate: kiss_fft_state::new(nfft, inverse_fft),
-                tmpbuf: vec![kiss_fft_cpx::new(); nfft as usize],
-                super_twiddles: vec![kiss_fft_cpx::new(); nfft as usize / 2],
+                tmpbuf: vec![kiss_fft_cpx::new(); nfft],
+                super_twiddles: vec![kiss_fft_cpx::new(); nfft / 2],
             };
-            for i in 0..nfft as usize / 2 {
+            for i in 0..nfft / 2 {
                 let mut phase =
                     -3.14159265358979323846264338327 * ((i as f64 + 1.0) / nfft as f64 + 0.5);
                 if inverse_fft != 0 {
@@ -310,7 +313,7 @@ mod inner {
     #[derive(Clone, Debug)]
     pub struct NLP {
         pub Fs: i32, //  sample rate in Hz
-        pub m: i32,
+        pub m: usize,
         pub w: [f32; PMAX_M / DEC], //  DFT window
         pub sq: [f32; PMAX_M],      //  squared speech samples
         pub mem_x: f32,
@@ -325,13 +328,13 @@ mod inner {
             let (m, vsize) = if c2const.Fs == 16000 {
                 (
                     c2const.m_pitch / 2,
-                    FDMDV_OS_TAPS_16K as usize + c2const.n_samp as usize,
+                    FDMDV_OS_TAPS_16K as usize + c2const.n_samp,
                 )
             } else {
                 (c2const.m_pitch, 0)
             };
             let mut w = [0.0; PMAX_M / DEC];
-            for i in 0..m as usize / DEC {
+            for i in 0..m / DEC {
                 w[i] =
                     0.5 - 0.5 * (2.0 * PI as f32 * i as f32 / (m as f32 / DEC as f32 - 1.0)).cos();
             }
@@ -351,7 +354,7 @@ mod inner {
     #[derive(Clone, Debug, Copy)]
     pub struct MODEL {
         pub Wo: f32,                 //  fundamental frequency estimate in radians
-        pub L: i32,                  //  number of harmonics
+        pub L: usize,                //  number of harmonics
         pub A: [f32; MAX_AMP + 1],   //  amplitiude of each harmonic
         pub phi: [f32; MAX_AMP + 1], //  phase of each harmonic
         pub voiced: i32,             //  non-zero if this frame is voiced
@@ -360,11 +363,11 @@ mod inner {
         pub fn new(p_max: f32) -> Self {
             let wo = TWO_PI / p_max;
             Self {
-                Wo: wo,                             //  fundamental frequency estimate in radians
-                L: (PI / wo as f64).floor() as i32, //  number of harmonics
-                A: [0.0; MAX_AMP + 1],              //  amplitiude of each harmonic
-                phi: [0.0; MAX_AMP + 1],            //  phase of each harmonic
-                voiced: 0,                          //  non-zero if this frame is voiced
+                Wo: wo,                               //  fundamental frequency estimate in radians
+                L: (PI / wo as f64).floor() as usize, //  number of harmonics
+                A: [0.0; MAX_AMP + 1],                //  amplitiude of each harmonic
+                phi: [0.0; MAX_AMP + 1],              //  phase of each harmonic
+                voiced: 0,                            //  non-zero if this frame is voiced
             }
         }
     }
@@ -377,7 +380,7 @@ type kiss_fft_cfg = kiss_fft_state;
 as far as kissfft is concerned
 4*4*4*2
 */
-const PE_FFT_SIZE: i32 = 512;
+const PE_FFT_SIZE: usize = 512;
 const MAXFACTORS: usize = 32;
 
 type codec2_fft_cfg = kiss_fft_state;
@@ -393,11 +396,6 @@ fn codec2_fftri(cfg: &mut codec2_fftr_cfg, inp: &[kiss_fft_cpx], out: &mut [f32]
     kiss_fft::kiss_fftri(cfg, inp, out);
 }
 
-// there is a little overhead for inplace kiss_fft but this is
-// on the powerful platforms like the Raspberry or even x86 PC based ones
-// not noticeable
-// the reduced usage of RAM and increased performance on STM32 platforms
-// should be worth it.
 fn codec2_fft_inplace(cfg: &codec2_fft_cfg, inout: &mut [kiss_fft_cpx]) {
     let mut in_ = [kiss_fft_cpx::new(); 512];
     // decide whether to use the local stack based buffer for in
@@ -405,7 +403,7 @@ fn codec2_fft_inplace(cfg: &codec2_fft_cfg, inout: &mut [kiss_fft_cpx]) {
     // second part is just to play safe since first method
     // is much faster and uses less RAM
     if cfg.nfft <= 512 {
-        in_[..cfg.nfft as usize].copy_from_slice(&inout[..cfg.nfft as usize]);
+        in_[..cfg.nfft].copy_from_slice(&inout[..cfg.nfft]);
         kiss_fft::kiss_fft(cfg, &in_, inout);
     } else {
         kiss_fft::kiss_fft(cfg, &inout.to_vec(), inout);
@@ -421,11 +419,11 @@ const LPCPF_GAMMA: f32 = 0.5;
 
 #[derive(Clone, Debug)]
 struct Codec2Internal {
-    mode: i32,
+    mode: Codec2Mode,
     c2const: C2const,
     Fs: i32,
-    n_samp: i32,
-    m_pitch: i32,
+    n_samp: usize,
+    m_pitch: usize,
     fft_fwd_cfg: codec2_fft_cfg,   //  forward FFT config
     fftr_fwd_cfg: codec2_fftr_cfg, //  forward real FFT config
     w: Vec<f32>,                   //  [m_pitch] time domain hamming window
@@ -474,23 +472,23 @@ fn make_synthesis_window(c2const: &C2const, Pn: &mut [f32]) {
     let tw = c2const.tw;
 
     //  Generate Parzen window in time domain
-    for i in 0..(n_samp / 2 - tw) as usize {
+    for i in 0..n_samp / 2 - tw {
         Pn[i] = 0.0;
     }
     let mut win = 0.0;
-    for i in (n_samp / 2 - tw) as usize..(n_samp / 2 + tw) as usize {
+    for i in n_samp / 2 - tw..n_samp / 2 + tw {
         Pn[i] = win;
         win += 1.0 / (2.0 * tw as f32);
     }
-    for i in (n_samp / 2 + tw) as usize..(3 * n_samp / 2 - tw) as usize {
+    for i in n_samp / 2 + tw..3 * n_samp / 2 - tw {
         Pn[i] = 1.0;
     }
     win = 1.0;
-    for i in (3 * n_samp / 2 - tw) as usize..(3 * n_samp / 2 + tw) as usize {
+    for i in 3 * n_samp / 2 - tw..3 * n_samp / 2 + tw {
         Pn[i] = win;
         win -= 1.0 / (2.0 * tw as f32);
     }
-    for i in (3 * n_samp / 2 + tw) as usize..(2 * n_samp) as usize {
+    for i in 3 * n_samp / 2 + tw..2 * n_samp {
         Pn[i] = 0.0;
     }
 }
@@ -517,16 +515,16 @@ fn make_analysis_window(
     */
 
     let mut m = 0.0;
-    for i in 0..(m_pitch / 2 - nw / 2) as usize {
+    for i in 0..m_pitch / 2 - nw / 2 {
         w[i] = 0.0;
     }
     let mut j = 0;
-    for i in (m_pitch / 2 - nw / 2) as usize..(m_pitch / 2 + nw / 2) as usize {
+    for i in m_pitch / 2 - nw / 2..m_pitch / 2 + nw / 2 {
         w[i] = 0.5 - 0.5 * (TWO_PI * (j as f32) / ((nw as f32) - 1.0)).cos();
         m += w[i] * w[i];
         j += 1;
     }
-    for i in (m_pitch / 2 + nw / 2) as usize..(m_pitch) as usize {
+    for i in m_pitch / 2 + nw / 2..m_pitch {
         w[i] = 0.0;
     }
 
@@ -534,7 +532,7 @@ fn make_analysis_window(
     forward */
 
     m = 1.0 / (m * FFT_ENC as f32).sqrt();
-    for i in 0..m_pitch as usize {
+    for i in 0..m_pitch {
         w[i] *= m;
     }
 
@@ -565,11 +563,11 @@ fn make_analysis_window(
         wshift[i].r = 0.0;
         wshift[i].i = 0.0;
     }
-    for i in 0..(nw / 2) as usize {
-        wshift[i].r = w[i + (m_pitch as usize) / 2];
+    for i in 0..(nw / 2) {
+        wshift[i].r = w[i + (m_pitch) / 2];
     }
-    let mut j = (m_pitch / 2 - nw / 2) as usize;
-    for i in FFT_ENC - (nw as usize) / 2..FFT_ENC {
+    let mut j = m_pitch / 2 - nw / 2;
+    for i in FFT_ENC - nw / 2..FFT_ENC {
         wshift[i].r = w[j];
         j += 1;
     }
@@ -713,16 +711,17 @@ fn unpack_natural_or_gray(
     }
 }
 
-/// Codec mode (bitrate). Currently only MODE_3200 is implemented!
+/// Codec mode (bitrate). Currently only MODE_3200 and MODE_2400 are implemented
+#[derive(Clone, Debug, Copy)]
 pub enum Codec2Mode {
     MODE_3200,
     MODE_2400,
-    MODE_1600,
-    MODE_1400,
-    MODE_1300,
-    MODE_1200,
-    MODE_700C,
-    MODE_450,
+    //MODE_1600,
+    //MODE_1400,
+    //MODE_1300,
+    //MODE_1200,
+    //MODE_700C,
+    //MODE_450,
     //MODE_450PWB,
 }
 use Codec2Mode::*;
@@ -736,33 +735,29 @@ pub struct Codec2 {
 impl Codec2 {
     /// Creates a new Codec2 object suitable for encoding or decoding audio
     pub fn new(mode: Codec2Mode) -> Self {
-        if let MODE_3200 = mode {
-        } else {
-            panic!("Unimplemented Codec2 mode.");
-        }
         let c2const = C2const::new(8000, N_S);
         let n_samp = c2const.n_samp;
         let m_pitch = c2const.m_pitch;
         let mut c2 = Self {
             internal: Codec2Internal {
-                mode: 0,
+                mode: mode,
                 Fs: c2const.Fs,
                 n_samp: n_samp,
                 m_pitch: m_pitch,
-                fft_fwd_cfg: kiss_fft_state::new(FFT_ENC as i32, 0), //  forward FFT config
-                fftr_fwd_cfg: kiss_fftr_state::new(FFT_ENC as i32, 0), //  forward real FFT config
-                w: vec![0.0; m_pitch as usize], //  [m_pitch] time domain hamming window
-                W: [0.0; FFT_ENC],              //  DFT of w[]
-                Pn: vec![0.0; 2 * n_samp as usize], //  [2*n_samp] trapezoidal synthesis window
-                bpf_buf: vec![0.0; BPF_N + 4 * n_samp as usize], //  buffer for band pass filter
-                Sn: vec![1.0; m_pitch as usize], //  [m_pitch] input speech
-                hpf_states: [0.0; 2],           //  high pass filter states
+                fft_fwd_cfg: kiss_fft_state::new(FFT_ENC, 0), //  forward FFT config
+                fftr_fwd_cfg: kiss_fftr_state::new(FFT_ENC, 0), //  forward real FFT config
+                w: vec![0.0; m_pitch], //  [m_pitch] time domain hamming window
+                W: [0.0; FFT_ENC],     //  DFT of w[]
+                Pn: vec![0.0; 2 * n_samp], //  [2*n_samp] trapezoidal synthesis window
+                bpf_buf: vec![0.0; BPF_N + 4 * n_samp], //  buffer for band pass filter
+                Sn: vec![1.0; m_pitch], //  [m_pitch] input speech
+                hpf_states: [0.0; 2],  //  high pass filter states
 
                 nlp: NLP::new(&c2const), //  pitch predictor states
                 gray: 1,                 //  non-zero for gray encoding
 
-                fftr_inv_cfg: kiss_fftr_state::new(FFT_DEC as i32, 1), //  inverse FFT config
-                Sn_: vec![0.0; m_pitch as usize], //  [2*n_samp] synthesised output speech
+                fftr_inv_cfg: kiss_fftr_state::new(FFT_DEC, 1), //  inverse FFT config
+                Sn_: vec![0.0; m_pitch], //  [2*n_samp] synthesised output speech
                 prev_f0_enc: 1.0 / P_MAX_S,
                 bg_est: 0.0,
                 ex_phase: 0.0,
@@ -796,25 +791,40 @@ impl Codec2 {
         c2
     }
 
-    /// The number of bits in an encoded (compressed) frame. At the 3200 bitrate, this is 64.
+    /// The number of bits in an encoded (compressed) frame; 64 for the 3200 bitrate, 48 for 2400.
     pub fn bits_per_frame(&self) -> usize {
-        64
+        if let MODE_3200 = self.internal.mode {
+            64
+        } else {
+            48
+        }
     }
 
-    /// The count of samples an encoded (compressed) frame represents. 160 at the 3200 bitrate.
+    /// How many samples an encoded (compressed) frame represents; generally 160 (20ms of speech).
     pub fn samples_per_frame(&self) -> usize {
         160
     }
-    /// Encodes speech samples at current bitrate.
-    /// At 3200, encodes 160 samples (20ms of speech) into 64 bits.
+
+    /// Encodes speech samples at current bitrate into `bits_per_frame()`/8 rounded up output bytes.
+    /// For MODE_3200, this is 64 bits or 8 bytes, for MODE_2400, it's 48 bits (6 bytes).
     pub fn encode(&mut self, bits: &mut [u8], speech: &[i16]) {
-        self.codec2_encode_3200(bits, speech)
+        if let MODE_3200 = self.internal.mode {
+            self.codec2_encode_3200(bits, speech)
+        } else {
+            self.codec2_encode_2400(bits, speech)
+        }
     }
-    /// Decodes compressed bits into speech samples at current bitrate.
-    /// At 3200, decodes a frame of 64 bits into 160 samples (20ms) of speech.
+
+    /// Decodes `bits_per_frame()` compressed bits into `samples_per_frame()` speech samples.
+    /// For MODE_3200, the input is 64 bits or 8 bytes, for MODE_2400, it's 48 bits (6 bytes).
     pub fn decode(&mut self, speech: &mut [i16], bits: &[u8]) {
-        self.codec2_decode_3200(speech, bits)
+        if let MODE_3200 = self.internal.mode {
+            self.codec2_decode_3200(speech, bits)
+        } else {
+            self.codec2_decode_2400(speech, bits)
+        }
     }
+
     /*---------------------------------------------------------------------------*\
 
       FUNCTION....: codec2_encode_3200
@@ -858,7 +868,7 @@ impl Codec2 {
         pack(bits, &mut nbit, model.voiced, 1);
 
         //  second 10ms analysis frame
-        self.analyse_one_frame(&mut model, &speech[self.internal.n_samp as usize..]);
+        self.analyse_one_frame(&mut model, &speech[self.internal.n_samp..]);
         pack(bits, &mut nbit, model.voiced, 1);
         let Wo_index = encode_Wo(&self.internal.c2const, model.Wo, WO_BITS);
         pack(bits, &mut nbit, Wo_index, WO_BITS as u32); //1+1+7 = 9 bits
@@ -868,7 +878,7 @@ impl Codec2 {
             &mut ak,
             &self.internal.Sn,
             &self.internal.w,
-            self.internal.m_pitch as usize,
+            self.internal.m_pitch,
             LPC_ORD,
         );
         let e_index = encode_energy(e, E_BITS);
@@ -907,7 +917,7 @@ impl Codec2 {
 
         let Wo_index = unpack(bits, &mut nbit, WO_BITS as u32);
         model[1].Wo = decode_Wo(&self.internal.c2const, Wo_index, WO_BITS);
-        model[1].L = (PI / model[1].Wo as f64) as i32;
+        model[1].L = (PI / model[1].Wo as f64) as usize;
 
         let mut e = [0.0; 2];
         let e_index = unpack(bits, &mut nbit, E_BITS as u32);
@@ -966,17 +976,184 @@ impl Codec2 {
             );
             apply_lpc_correction(&mut model[i]);
             self.synthesise_one_frame(
-                &mut speech[self.internal.n_samp as usize * i..],
+                &mut speech[self.internal.n_samp * i..],
                 &mut model[i],
                 &mut Aw,
                 1.0,
             );
-            //println!("Model Wo {:.4} L {} A1 {:.4} A{} {:.4} A{} {:.4}", model[i].Wo, model[i].L, model[i].A[1], model[i].L/2, model[i].A[model[i].L as usize/2], model[i].L-1, model[i].A[model[i].L as usize-1]);
-            //println!("Model Wo {:.4} L {} phi1 {:.4} phi{} {:.4} phi{} {:.4}", model[i].Wo, model[i].L, model[i].phi[1], model[i].L/2, model[i].phi[model[i].L as usize/2], model[i].L-1, model[i].phi[model[i].L as usize-1]);
         }
 
         //  update memories for next frame ----------------------------
 
+        self.internal.prev_model_dec = model[1];
+        self.internal.prev_e_dec = e[1];
+        for i in 0..LPC_ORD {
+            self.internal.prev_lsps_dec[i] = lsps[1][i];
+        }
+    }
+
+    /*---------------------------------------------------------------------------*\
+
+      FUNCTION....: codec2_encode_2400
+      AUTHOR......: David Rowe
+      DATE CREATED: 21/8/2010
+
+      Encodes 160 speech samples (20ms of speech) into 48 bits.
+
+      The codec2 algorithm actually operates internally on 10ms (80
+      sample) frames, so we run the encoding algorithm twice.  On the
+      first frame we just send the voicing bit.  On the second frame we
+      send all model parameters.
+
+      The bit allocation is:
+
+        Parameter                      bits/frame
+        --------------------------------------
+        Harmonic magnitudes (LSPs)     36
+        Joint VQ of Energy and Wo       8
+        Voicing (10ms update)           2
+        Spare                           2
+        TOTAL                          48
+
+    \*---------------------------------------------------------------------------*/
+    /// Encodes 160 speech samples (20ms of speech) into 48 bits.
+    fn codec2_encode_2400(&mut self, bits: &mut [u8], speech: &[i16]) {
+        let mut model = MODEL::new(self.internal.c2const.p_max as f32);
+        let mut ak = [0.0; LPC_ORD + 1]; //f32
+        let mut lsps = [0.0; LPC_ORD]; //f32
+        let mut lsp_indexes = [0; LPC_ORD];
+        let mut nbit = 0;
+
+        for i in 0..(self.bits_per_frame() + 7) / 8 {
+            bits[i] = 0;
+        }
+
+        //  first 10ms analysis frame - we just want voicing
+        self.analyse_one_frame(&mut model, speech);
+        pack(bits, &mut nbit, model.voiced, 1);
+
+        //  second 10ms analysis frame
+        self.analyse_one_frame(&mut model, &speech[self.internal.n_samp..]);
+        pack(bits, &mut nbit, model.voiced, 1);
+        let e = speech_to_uq_lsps(
+            &mut lsps,
+            &mut ak,
+            &self.internal.Sn,
+            &self.internal.w,
+            self.internal.m_pitch,
+            LPC_ORD,
+        );
+
+        let WoE_index = encode_WoE(&model, e, &mut self.internal.xq_enc);
+        pack(bits, &mut nbit, WoE_index, WO_E_BITS);
+
+        encode_lsps_scalar(&mut lsp_indexes, &lsps, LPC_ORD);
+        for i in 0..LSP_SCALAR_INDEXES {
+            pack(bits, &mut nbit, lsp_indexes[i], lsp_bits(i));
+        }
+        let spare = 0;
+        pack(bits, &mut nbit, spare, 2);
+
+        //assert(nbit == (unsigned)codec2_bits_per_frame(c2));
+    }
+
+    /*---------------------------------------------------------------------------*\
+
+      FUNCTION....: codec2_decode_2400
+      AUTHOR......: David Rowe
+      DATE CREATED: 21/8/2010
+
+      Decodes frames of 48 bits into 160 samples (20ms) of speech.
+
+    \*---------------------------------------------------------------------------*/
+    fn codec2_decode_2400(&mut self, speech: &mut [i16], bits: &[u8]) {
+        let mut model = [MODEL::new(self.internal.c2const.p_max as f32); 2];
+        let mut lsp_indexes = [0; LPC_ORD];
+        let mut lsps = [[0.0; LPC_ORD]; 2];
+        let mut e = [0.0; 2];
+        let mut snr = 0.0;
+        let mut ak = [[0.0; LPC_ORD + 1]; 2];
+        let mut nbit = 0;
+        let mut Aw = [COMP::new(); FFT_ENC];
+
+        //assert(c2 != NULL);
+
+        /* unpack bits from channel ------------------------------------*/
+
+        /* this will partially fill the model params for the 2 x 10ms
+        frames */
+        model[0].voiced = unpack(bits, &mut nbit, 1);
+        model[1].voiced = unpack(bits, &mut nbit, 1);
+
+        let WoE_index = unpack(bits, &mut nbit, WO_E_BITS) as usize;
+        decode_WoE(
+            &self.internal.c2const,
+            &mut model[1],
+            &mut e[1],
+            &mut self.internal.xq_dec,
+            WoE_index,
+        );
+
+        for i in 0..LSP_SCALAR_INDEXES {
+            lsp_indexes[i] = unpack(bits, &mut nbit, lsp_bits(i)) as usize;
+        }
+        decode_lsps_scalar(&mut lsps[1][0..], &lsp_indexes, LPC_ORD);
+        check_lsp_order(&mut lsps[1][0..], LPC_ORD);
+        bw_expand_lsps(&mut lsps[1][0..], LPC_ORD, 50.0, 100.0);
+
+        /* interpolate ------------------------------------------------*/
+
+        /* Wo and energy are sampled every 20ms, so we interpolate just 1
+        10ms frame between 20ms samples */
+
+        let (model0, model1) = model.split_at_mut(1);
+        interp_Wo(
+            &mut model0[0],
+            &self.internal.prev_model_dec,
+            &model1[0],
+            self.internal.c2const.Wo_min,
+        );
+        e[0] = interp_energy(self.internal.prev_e_dec, e[1]);
+
+        /* LSPs are sampled every 20ms so we interpolate the frame in
+        between, then recover spectral amplitudes */
+
+        let (lsps0, lsps1) = lsps.split_at_mut(1);
+        interpolate_lsp_ver2(
+            &mut lsps0[0][0..],
+            &self.internal.prev_lsps_dec,
+            &mut lsps1[0][0..],
+            0.5,
+            LPC_ORD,
+        );
+
+        for i in 0..2 {
+            lsp_to_lpc(&lsps[i][0..], &mut ak[i][0..], LPC_ORD);
+            aks_to_M2(
+                &mut self.internal.fftr_fwd_cfg,
+                &ak[i][..],
+                LPC_ORD,
+                &mut model[i],
+                e[i],
+                &mut snr,
+                0,
+                0,
+                self.internal.lpc_pf,
+                self.internal.bass_boost,
+                self.internal.beta,
+                self.internal.gamma,
+                &mut Aw,
+            );
+            apply_lpc_correction(&mut model[i]);
+            self.synthesise_one_frame(
+                &mut speech[self.internal.n_samp * i..],
+                &mut model[i],
+                &mut Aw,
+                1.0,
+            );
+        }
+
+        /* update memories for next frame ----------------------------*/
         self.internal.prev_model_dec = model[1];
         self.internal.prev_e_dec = e[1];
         for i in 0..LPC_ORD {
@@ -996,8 +1173,8 @@ impl Codec2 {
     \*---------------------------------------------------------------------------*/
     fn analyse_one_frame(&mut self, model: &mut MODEL, speech: &[i16]) {
         let mut Sw = [COMP::new(); FFT_ENC];
-        let n_samp = self.internal.n_samp as usize;
-        let m_pitch = self.internal.m_pitch as usize;
+        let n_samp = self.internal.n_samp;
+        let m_pitch = self.internal.m_pitch;
 
         //  Read input speech
         for i in 0..m_pitch - n_samp {
@@ -1018,14 +1195,14 @@ impl Codec2 {
         nlp::nlp(
             &mut self.internal.nlp,
             &self.internal.Sn,
-            n_samp as i32,
+            n_samp,
             &mut pitch,
             &Sw,
             &self.internal.W,
             &mut self.internal.prev_f0_enc,
         );
         model.Wo = TWO_PI / pitch;
-        model.L = (PI / model.Wo as f64) as i32;
+        model.L = (PI / model.Wo as f64) as usize;
 
         //  estimate model parameters
         two_stage_pitch_refinement(&self.internal.c2const, model, &Sw);
@@ -1063,7 +1240,7 @@ impl Codec2 {
 
         postfilter(model, &mut self.internal.bg_est);
         synthesise(
-            self.internal.n_samp as usize,
+            self.internal.n_samp,
             &mut self.internal.fftr_inv_cfg,
             &mut self.internal.Sn_,
             model,
@@ -1071,13 +1248,13 @@ impl Codec2 {
             true,
         );
 
-        for i in 0..self.internal.n_samp as usize {
+        for i in 0..self.internal.n_samp {
             self.internal.Sn_[i] *= gain;
         }
 
-        ear_protection(&mut self.internal.Sn_, self.internal.n_samp as usize);
+        ear_protection(&mut self.internal.Sn_, self.internal.n_samp);
 
-        for i in 0..self.internal.n_samp as usize {
+        for i in 0..self.internal.n_samp {
             if self.internal.Sn_[i] > 32767.0 {
                 speech[i] = 32767;
             } else if self.internal.Sn_[i] < -32767.0 {
@@ -1252,7 +1429,7 @@ fn estimate_amplitudes(model: &mut MODEL, Sw: &[COMP], _W: &[f32], est_phase: i3
     let r = TWO_PI / (FFT_ENC as f32);
     let one_on_r = 1.0 / r;
 
-    for m in 1..model.L as usize + 1 {
+    for m in 1..model.L + 1 {
         //  Estimate ampltude of harmonic
 
         let mut den = 0.0; // denominator of amplitude expression
@@ -1311,7 +1488,7 @@ fn two_stage_pitch_refinement(c2const: &C2const, model: &mut MODEL, Sw: &[COMP])
         model.Wo = TWO_PI / (c2const.p_min as f32);
     }
 
-    model.L = (PI / model.Wo as f64).floor() as i32;
+    model.L = (PI / model.Wo as f64).floor() as usize;
 
     //  trap occasional round off issues with floorf()
     if model.Wo * model.L as f32 >= 0.95 * PI as f32 {
@@ -1339,7 +1516,7 @@ fn two_stage_pitch_refinement(c2const: &C2const, model: &mut MODEL, Sw: &[COMP])
 fn hs_pitch_refinement(model: &mut MODEL, Sw: &[COMP], pmin: f32, pmax: f32, pstep: f32) {
     //  Initialisation
 
-    model.L = (PI / model.Wo as f64) as i32; //  use initial pitch est. for L
+    model.L = (PI / model.Wo as f64) as usize; //  use initial pitch est. for L
     let mut Wom = model.Wo; // Wo that maximises E
     let mut Em = 0.0; // mamimum energy
     let r = TWO_PI / FFT_ENC as f32; // number of rads/bin

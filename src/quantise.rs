@@ -264,6 +264,141 @@ pub fn encode_Wo(c2const: &C2const, Wo: f32, bits: i32) -> i32 {
 
 /*---------------------------------------------------------------------------*\
 
+  FUNCTION....: encode_WoE()
+  AUTHOR......: Jean-Marc Valin & David Rowe, conversion by Matt Weeks
+  DATE CREATED: 11 May 2012
+
+  Joint Wo and LPC energy vector quantiser developed my Jean-Marc
+  Valin.  Returns index, and updated states xq[].
+
+\*---------------------------------------------------------------------------*/
+pub fn encode_WoE(model: &MODEL, mut e: f32, xq: &mut [f32]) -> i32 {
+    let mut err = [0.0, 0.0];
+    let mut w = [0.0, 0.0];
+    let codebook1 = ge_cb[0].cb;
+    let nb_entries = 1 << WO_E_BITS;
+    let ndim = ge_cb[0].k;
+    let ge_coeff = [0.8, 0.9];
+    //assert((1<<WO_E_BITS) == nb_entries);
+
+    if e < 0.0 {
+        e = 0.0;
+    } /* occasional small negative energies due LPC round off I guess */
+
+    let mut x = [0.0, 0.0];
+    x[0] = ((model.Wo / PI as f32) * 4000.0 / 50.0).log10() / 2.0_f32.log10();
+    x[1] = 10.0 * (1e-4 + e).log10();
+
+    compute_weights2(&x, xq, &mut w);
+    for i in 0..ndim {
+        err[i] = x[i] - ge_coeff[i] * xq[i];
+    }
+    let n1 = find_nearest_weighted(codebook1, nb_entries, &err, &w, ndim);
+
+    for i in 0..ndim {
+        xq[i] = ge_coeff[i] * xq[i] + codebook1[ndim * n1 + i];
+        err[i] -= codebook1[ndim * n1 + i];
+    }
+
+    //printf("enc: %f %f (%f)(%f) \n", xq[0], xq[1], e, 10.0*log10(1e-4 + e));
+    n1 as i32
+}
+
+pub fn lsp_bits(i: usize) -> u32 {
+    lsp_cb[i].log2m as u32
+}
+
+fn compute_weights2(x: &[f32], xp: &[f32], w: &mut [f32]) {
+    w[0] = 30.0;
+    w[1] = 1.0;
+    if x[1] < 0.0 {
+        w[0] *= 0.6;
+        w[1] *= 0.3;
+    }
+    if x[1] < -10.0 {
+        w[0] *= 0.3;
+        w[1] *= 0.3;
+    }
+    /* Higher weight if pitch is stable */
+    if (x[0] - xp[0]).abs() < 0.2 {
+        w[0] *= 2.0;
+        w[1] *= 1.5;
+    } else if (x[0] - xp[0]).abs() > 0.5
+    /* Lower if not stable */
+    {
+        w[0] *= 0.5;
+    }
+
+    /* Lower weight for low energy */
+    if x[1] < xp[1] - 10.0 {
+        w[1] *= 0.5;
+    }
+    if x[1] < xp[1] - 20.0 {
+        w[1] *= 0.5;
+    }
+
+    //w[0] = 30;
+    //w[1] = 1;
+
+    /* Square the weights because it's applied on the squared error */
+    w[0] *= w[0];
+    w[1] *= w[1];
+}
+
+fn find_nearest_weighted(
+    codebook: &[f32],
+    nb_entries: usize,
+    x: &[f32],
+    w: &[f32],
+    ndim: usize,
+) -> usize {
+    let mut min_dist = 1e15;
+    let mut nearest = 0;
+
+    for i in 0..nb_entries {
+        let mut dist = 0.0;
+        for j in 0..ndim {
+            dist += w[j] * (x[j] - codebook[i * ndim + j]) * (x[j] - codebook[i * ndim + j]);
+        }
+        if dist < min_dist {
+            min_dist = dist;
+            nearest = i;
+        }
+    }
+    nearest
+}
+
+/*---------------------------------------------------------------------------*\
+
+  FUNCTION....: encode_lsps_scalar()
+  AUTHOR......: David Rowe
+  DATE CREATED: 22/8/2010
+
+  Thirty-six bit sclar LSP quantiser. From a vector of unquantised
+  (floating point) LSPs finds the quantised LSP indexes.
+
+\*---------------------------------------------------------------------------*/
+pub fn encode_lsps_scalar(indexes: &mut [i32], lsp: &[f32], order: usize) {
+    let mut lsp_hz = vec![0.0; order];
+    let mut se = 0.0;
+
+    /* convert from radians to Hz so we can use human readable
+    frequencies */
+
+    for i in 0..order {
+        lsp_hz[i] = (4000.0 / PI as f32) * lsp[i];
+    }
+    /* scalar quantisers */
+
+    let mut wt = [1.0; 1];
+    for i in 0..order {
+        let k = lsp_cb[i].k;
+        indexes[i] = quantise(lsp_cb[i].cb, &lsp_hz[i..], &mut wt, k, &mut se) as i32;
+    }
+}
+
+/*---------------------------------------------------------------------------*\
+
   FUNCTION....: decode_Wo()
   AUTHOR......: David Rowe, conversion by Matt Weeks
   DATE CREATED: 22/8/2010
@@ -416,11 +551,10 @@ pub fn encode_lspds_scalar(indexes: &mut [i32], lsp: &[f32], order: usize) {
         } else {
             dlsp[0] = lsp_hz[0];
         }
-        let k = lsp_cbd[i].k as usize;
-        let m = lsp_cbd[i].m as usize;
+        let k = lsp_cbd[i].k;
         let cb = lsp_cbd[i].cb;
         let mut se = 0.0;
-        indexes[i] = quantise(cb, &mut dlsp[i..], &wt, k, m, &mut se) as i32;
+        indexes[i] = quantise(cb, &mut dlsp[i..], &wt, k, &mut se) as i32;
         dlsp_[i] = cb[indexes[i] as usize * k];
 
         if i != 0 {
@@ -445,12 +579,11 @@ fn quantise(
     vec: &[f32],  //  vec[];    vector to quantise
     w: &[f32],    //  w[];      weighting vector
     k: usize,     //  k;        dimension of vectors
-    m: usize,     //  m;        size of codebook
     se: &mut f32, //  *se;      accumulated squared error
 ) -> i64 {
     let mut besti = 0; // best index so far
     let mut beste = 1E32; // best error so far
-    for j in 0..m {
+    for j in 0..cb.len() {
         let mut e = 0.0; // current error
         for i in 0..k {
             let diff = cb[j * k + i] - vec[i];
@@ -580,7 +713,7 @@ pub fn aks_to_M2(
     let mut signal = 1E-30;
     let mut noise = 1E-32;
 
-    for m in 1..model.L as usize + 1 {
+    for m in 1..model.L + 1 {
         //limits of current band
         let am = ((m as f32 - 0.5) * model.Wo / r + 0.5) as usize;
         let mut bm = ((m as f32 + 0.5) * model.Wo / r + 0.5) as usize;
@@ -650,7 +783,7 @@ pub fn sample_phase(
 
     //  Sample phase at harmonics
 
-    for m in 1..model.L as usize + 1 {
+    for m in 1..model.L + 1 {
         let b = (m as f32 * model.Wo / r + 0.5) as usize;
         H[m] = cconj(A[b]); //  synth filter 1/A is opposite phase to analysis filter
     }
@@ -747,7 +880,7 @@ pub fn sample_phase(
 
 \*---------------------------------------------------------------------------*/
 pub fn phase_synth_zero_order(
-    n_samp: i32,
+    n_samp: usize,
     model: &mut MODEL,
     ex_phase: &mut f32, //  excitation phase of fundamental
     H: &[COMP],         //  L synthesis filter freq domain samples
@@ -767,7 +900,7 @@ pub fn phase_synth_zero_order(
     *ex_phase += (model.Wo) * n_samp as f32;
     *ex_phase -= TWO_PI * (*ex_phase / TWO_PI + 0.5).floor();
 
-    for m in 1..model.L as usize + 1 {
+    for m in 1..model.L + 1 {
         //  generate excitation
 
         if model.voiced != 0 {
@@ -990,7 +1123,7 @@ fn interp_Wo2(
     } else {
         interp.Wo = Wo_min;
     }
-    interp.L = (PI / interp.Wo as f64) as i32;
+    interp.L = (PI / interp.Wo as f64) as usize;
 }
 
 /*---------------------------------------------------------------------------*\
@@ -1035,7 +1168,7 @@ pub fn decode_lspds_scalar(lsp_: &mut [f32], indexes: &[usize], order: usize) {
     let mut dlsp_ = vec![0.0; order];
 
     for i in 0..order {
-        let k = lsp_cbd[i].k as usize;
+        let k = lsp_cbd[i].k;
         dlsp_[i] = lsp_cbd[i].cb[indexes[i] * k];
 
         if i != 0 {
@@ -1140,7 +1273,7 @@ pub fn synthesise(
     }
 
     //  Now set up frequency domain synthesised speech
-    for l in 1..model.L as usize + 1 {
+    for l in 1..model.L + 1 {
         let mut b = (l as f32 * model.Wo * FFT_DEC as f32 / TWO_PI + 0.5) as usize;
         if b > ((FFT_DEC / 2) - 1) {
             b = (FFT_DEC / 2) - 1;
@@ -1235,7 +1368,7 @@ pub fn postfilter(model: &mut MODEL, bg_est: &mut f32) {
     //  determine average energy across spectrum
 
     let mut e = 1E-12;
-    for m in 1..model.L as usize + 1 {
+    for m in 1..model.L + 1 {
         e += model.A[m] * model.A[m];
     }
     //  assert(e > 0.0);
@@ -1254,7 +1387,7 @@ pub fn postfilter(model: &mut MODEL, bg_est: &mut f32) {
     //  let mut uv = 0;
     let thresh = 10.0_f32.powf((*bg_est + BG_MARGIN) / 20.0);
     if model.voiced != 0 {
-        for m in 1..model.L as usize + 1 {
+        for m in 1..model.L + 1 {
             if model.A[m] < thresh {
                 model.phi[m] = (TWO_PI / CODEC2_RAND_MAX) * codec2_rand();
                 //uv++;
@@ -1264,4 +1397,119 @@ pub fn postfilter(model: &mut MODEL, bg_est: &mut f32) {
     //#ifdef DUMP
     //  dump_bg(e, *bg_est, 100.0*uv/model.L);
     //#endif
+}
+
+/*---------------------------------------------------------------------------*\
+
+  FUNCTION....: bw_expand_lsps()
+  AUTHOR......: David Rowe
+  DATE CREATED: 22/8/2010
+
+  Applies Bandwidth Expansion (BW) to a vector of LSPs.  Prevents any
+  two LSPs getting too close together after quantisation.  We know
+  from experiment that LSP quantisation errors < 12.5Hz (25Hz step
+  size) are inaudible so we use that as the minimum LSP separation.
+
+\*---------------------------------------------------------------------------*/
+
+pub fn bw_expand_lsps(lsp: &mut [f32], order: usize, min_sep_low: f32, min_sep_high: f32) {
+    for i in 1..4 {
+        if (lsp[i] - lsp[i - 1]) < min_sep_low * (PI as f32 / 4000.0) {
+            lsp[i] = lsp[i - 1] + min_sep_low * (PI as f32 / 4000.0);
+        }
+    }
+
+    /* As quantiser gaps increased, larger BW expansion was required
+       to prevent twinkly noises.  This may need more experiment for
+       different quanstisers.
+    */
+
+    for i in 4..order {
+        if lsp[i] - lsp[i - 1] < min_sep_high * (PI as f32 / 4000.0) {
+            lsp[i] = lsp[i - 1] + min_sep_high * (PI as f32 / 4000.0);
+        }
+    }
+}
+
+pub fn check_lsp_order(lsp: &mut [f32], order: usize) -> i32 {
+    let mut swaps = 0;
+
+    let mut i = 1;
+    while i < order {
+        if lsp[i] < lsp[i - 1] {
+            //fprintf(stderr, "swap %d\n",i);
+            swaps += 1;
+            let tmp = lsp[i - 1];
+            lsp[i - 1] = lsp[i] - 0.1;
+            lsp[i] = tmp + 0.1;
+            i = 1; /* start check again, as swap may have caused out of order */
+        }
+        i += 1;
+    }
+    swaps
+}
+
+/*---------------------------------------------------------------------------*\
+
+  FUNCTION....: decode_lsps_scalar()
+  AUTHOR......: David Rowe
+  DATE CREATED: 22/8/2010
+
+  From a vector of quantised LSP indexes, returns the quantised
+  (floating point) LSPs.
+
+\*---------------------------------------------------------------------------*/
+
+pub fn decode_lsps_scalar(lsp: &mut [f32], indexes: &[usize], order: usize) {
+    let mut lsp_hz = vec![0.0; order];
+
+    for i in 0..order {
+        let k = lsp_cb[i].k;
+        lsp_hz[i] = lsp_cb[i].cb[indexes[i] * k];
+    }
+
+    /* convert back to radians */
+
+    for i in 0..order {
+        lsp[i] = (PI as f32 / 4000.0) * lsp_hz[i];
+    }
+}
+
+/*---------------------------------------------------------------------------*\
+
+  FUNCTION....: decode_WoE()
+  AUTHOR......: Jean-Marc Valin & David Rowe
+  DATE CREATED: 11 May 2012
+
+  Joint Wo and LPC energy vector quantiser developed my Jean-Marc
+  Valin.  Given index and states xq[], returns Wo & E, and updates
+  states xq[].
+
+\*---------------------------------------------------------------------------*/
+pub fn decode_WoE(c2const: &C2const, model: &mut MODEL, e: &mut f32, xq: &mut [f32], n1: usize) {
+    let ge_coeff = [0.8, 0.9];
+    let ndim = ge_cb[0].k;
+    let Wo_min = c2const.Wo_min;
+    let Wo_max = c2const.Wo_max;
+
+    for i in 0..ndim {
+        xq[i] = ge_coeff[i] * xq[i] + ge_cb[0].cb[ndim * n1 + i];
+    }
+
+    //printf("dec: %f %f\n", xq[0], xq[1]);
+    model.Wo = 2.0_f32.powf(xq[0]) * (PI as f32 * 50.0) / 4000.0;
+
+    /* bit errors can make us go out of range leading to all sorts of
+    probs like seg faults */
+
+    if model.Wo > Wo_max {
+        model.Wo = Wo_max
+    };
+    if model.Wo < Wo_min {
+        model.Wo = Wo_min
+    };
+
+    model.L = (PI / model.Wo as f64) as usize; // if we quantise Wo re-compute L
+
+    *e = 10.0_f32.powf(xq[1] / 10.0);
 }

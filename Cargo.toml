@@ -1,6 +1,6 @@
 [package]
 name = "codec2"
-version = "0.1.0"
+version = "0.2.0"
 description = "A pure-Rust implementation of the Codec2 low-bitrate speech compression codec"
 authors = ["David Rowe", "Matt Weeks <scriptjunkie@scriptjunkie.us>"]
 license = "LGPL-2.1-only AND MIT"

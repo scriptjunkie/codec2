@@ -1,15 +1,24 @@
 # Codec2
 
-## Usage
-
-Create a Codec2 object (`Codec2::new(Codec2Mode::MODE_3200)`) then repeatedly obtain 8khz
-16-bit raw audio samples and call `encode` to encode blocks of 160 samples into an 8-byte
-(64-bit) compressed form, in order. On the receiving end, create a Codec2 object and repeatedly
-call `decode` to decompress each chunk of 8 received bytes into the next 160 samples.
-
-Complete example below.
-
 Add this to your `Cargo.toml`:
+
+```toml
+[dependencies]
+codec2 = "0.2"
+```
+
+## Usage
+Currently 3200 and 2400 bitrates encoding and decoding are implemented.
+
+Create a Codec2 object e.g. `Codec2::new(Codec2Mode::MODE_3200)` then repeatedly obtain raw 8khz
+16-bit audio samples and call `encode` to encode blocks of `samples_per_frame()` samples into
+`bits_per_frame()` compressed bits, in order. On the receiving end, create a Codec2 object and
+repeatedly call `decode` to decompress each chunk of received bytes into the next samples.
+
+Complete example below. This example uses zerocopy to interpret the `&[i16]` slices as `&[u8]` for
+I/O.
+
+Cargo.toml:
 
 ```toml
 [dependencies]
@@ -23,7 +32,7 @@ main.rs:
 use codec2::*;
 use std::env::args;
 use std::io::prelude::*;
-use zerocopy::LayoutVerified;
+use zerocopy::AsBytes;
 
 fn main() -> std::io::Result<()> {
     if args().len() != 4 || (args().nth(1).unwrap() != "enc" && args().nth(1).unwrap() != "dec") {
@@ -34,19 +43,17 @@ fn main() -> std::io::Result<()> {
     let mut fin = std::fs::File::open(args().nth(2).unwrap())?;
     let mut fout = std::fs::File::create(args().nth(3).unwrap())?;
     let mut c2 = Codec2::new(Codec2Mode::MODE_3200);
-    let mut sampsbuf = vec![0; c2.samples_per_frame() * 2]; //u8 I/O buffer for 16-bit samples
+    let mut samps = vec![0; c2.samples_per_frame()]; //i16 I/O buffer
     let mut packed = vec![0; (c2.bits_per_frame() + 7) / 8]; //u8 I/O buffer for encoded bits
     if args().nth(1).unwrap() == "enc" {
-        while fin.read_exact(&mut sampsbuf).is_ok() {
-            let samps = LayoutVerified::new_slice(&sampsbuf[..]).expect("bad alignment"); //assumes samples are in correct endianness
+        while fin.read_exact(samps.as_bytes_mut()).is_ok() {
             c2.encode(&mut packed, &samps[..]);
             fout.write_all(&packed)?;
         }
     } else {
         while fin.read_exact(&mut packed).is_ok() {
-            let mut samps = LayoutVerified::new_slice(&mut sampsbuf[..]).expect("bad alignment");
             c2.decode(&mut samps[..], &packed);
-            fout.write_all(&sampsbuf)?;
+            fout.write_all(samps.as_bytes())?;
         }
     }
     Ok(())

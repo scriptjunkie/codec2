@@ -68,76 +68,65 @@ pub const lsp_cbd: [lsp_codebook; 11] = [
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes0,
     },
     /* codebook/dlsp2.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes1,
     },
     /* codebook/dlsp3.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes2,
     },
     /* codebook/dlsp4.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes3,
     },
     /* codebook/dlsp5.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes4,
     },
     /* codebook/dlsp6.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes5,
     },
     /* codebook/dlsp7.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes6,
     },
     /* codebook/dlsp8.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes7,
     },
     /* codebook/dlsp9.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes8,
     },
     /* codebook/dlsp10.txt */
     lsp_codebook {
         k: 1,
         log2m: 5,
-        m: 32,
         cb: &codes9,
     },
     lsp_codebook {
         k: 0,
         log2m: 0,
-        m: 0,
         cb: &codesnone,
     },
 ];
