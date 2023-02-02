@@ -616,6 +616,21 @@ pub fn interp_energy(prev_e: f32, next_e: f32) -> f32 {
 
 /*---------------------------------------------------------------------------*\
 
+  FUNCTION....: interp_energy2()
+  AUTHOR......: David Rowe, conversion by Raphael Peters
+  DATE CREATED: 22 May 2012
+
+  Interpolates centre 10ms sample of energy given two samples 20ms
+
+  apart.
+
+\*---------------------------------------------------------------------------*/
+pub fn interp_energy2(prev_e: f32, next_e: f32, weight: f32) -> f32 {
+    10f32.powf((1.0 - weight) * prev_e.log10() + weight * next_e.log10())
+}
+
+/*---------------------------------------------------------------------------*\
+
    aks_to_M2()
 
    Transforms the linear prediction coefficients to spectral amplitude
@@ -1084,9 +1099,7 @@ pub fn interp_Wo(
     next: &MODEL,   //  next frames model params
     Wo_min: f32,
 ) -> MODEL {
-    let mut interp = *interp;
-    interp_Wo2(&mut interp, prev, next, 0.5, Wo_min);
-    interp
+    interp_Wo2(interp, prev, next, 0.5, Wo_min)
 }
 
 /*---------------------------------------------------------------------------*\
@@ -1098,13 +1111,15 @@ pub fn interp_Wo(
   Weighted interpolation of two Wo samples.
 
 \*---------------------------------------------------------------------------*/
-fn interp_Wo2(
-    interp: &mut MODEL, //  interpolated model params
-    prev: &MODEL,       //  previous frames model params
-    next: &MODEL,       //  next frames model params
+#[must_use]
+pub fn interp_Wo2(
+    interp: &MODEL, //  interpolated model params
+    prev: &MODEL,   //  previous frames model params
+    next: &MODEL,   //  next frames model params
     weight: f32,
     Wo_min: f32,
-) {
+) -> MODEL {
+    let mut interp = *interp;
     //  trap corner case where voicing est is probably wrong
 
     if interp.voiced != 0 && prev.voiced == 0 && next.voiced == 0 {
@@ -1127,6 +1142,7 @@ fn interp_Wo2(
         interp.Wo = Wo_min;
     }
     interp.L = (PI / interp.Wo as f64) as usize;
+    interp
 }
 
 /*---------------------------------------------------------------------------*\
