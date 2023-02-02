@@ -1077,13 +1077,16 @@ fn lpc_post_filter(
   (interpolated) frame.
 
 \*---------------------------------------------------------------------------*/
+#[must_use]
 pub fn interp_Wo(
-    interp: &mut MODEL, //  interpolated model params
-    prev: &MODEL,       //  previous frames model params
-    next: &MODEL,       //  next frames model params
+    interp: &MODEL, //  interpolated model params
+    prev: &MODEL,   //  previous frames model params
+    next: &MODEL,   //  next frames model params
     Wo_min: f32,
-) {
-    interp_Wo2(interp, prev, next, 0.5, Wo_min);
+) -> MODEL {
+    let mut interp = *interp;
+    interp_Wo2(&mut interp, prev, next, 0.5, Wo_min);
+    interp
 }
 
 /*---------------------------------------------------------------------------*\
