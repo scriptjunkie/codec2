@@ -8,7 +8,7 @@ codec2 = "0.2"
 ```
 
 ## Usage
-Currently 3200, 2400, 1600, 1400 and 1300 bitrates encoding and decoding are implemented.
+Currently 3200, 2400, 1600, 1400, 1300 and 1200 bitrates encoding and decoding are implemented.
 
 Create a Codec2 object e.g. `Codec2::new(Codec2Mode::MODE_3200)` then repeatedly obtain raw 8khz
 16-bit audio samples and call `encode` to encode blocks of `samples_per_frame()` samples into

@@ -67,5 +67,6 @@ const codes0: [f32; 512] = [
 pub const ge_cb: [lsp_codebook; 1] = [lsp_codebook {
     k: 2,
     log2m: 8,
+    m: 256,
     cb: &codes0,
 }];

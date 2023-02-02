@@ -3,9 +3,14 @@ const LSP_DELTA1: f32 = 0.01;
 const E_MIN_DB: f32 = -10.0;
 const E_MAX_DB: f32 = 40.0;
 pub const E_BITS: i32 = 5;
+pub const LSP_PRED_VQ_INDEXES: usize = 3;
 
 pub fn lspd_bits(i: usize) -> i32 {
     lsp_cbd[i].log2m
+}
+
+pub fn lsp_pred_vq_bits(i: usize) -> i32 {
+    lsp_cbjvm[i].log2m
 }
 
 /*---------------------------------------------------------------------------*\
@@ -343,6 +348,35 @@ fn compute_weights2(x: &[f32], xp: &[f32], w: &mut [f32]) {
     /* Square the weights because it's applied on the squared error */
     w[0] *= w[0];
     w[1] *= w[1];
+}
+
+fn compute_weights(x: &[f32], w: &mut [f32], ndim: usize) {
+    w[0] = f32::min(x[0], x[1] - x[0]);
+    for i in 1..ndim - 1 {
+        w[i] = f32::min(x[i] - x[i - 1], x[i + 1] - x[i]);
+    }
+    w[ndim - 1] = f32::min(x[ndim - 1] - x[ndim - 2], PI as f32 - x[ndim - 1]);
+
+    for i in 0..ndim {
+        w[i] = 1. / (0.01 + w[i]);
+    }
+}
+
+fn find_nearest(codebook: &[f32], nb_entries: usize, x: &mut [f32], ndim: usize) -> usize {
+    let mut min_dist = 1e15;
+    let mut nearest = 0;
+
+    for i in 0..nb_entries {
+        let mut dist = 0f32;
+        for j in 0..ndim {
+            dist += (x[j] - codebook[i * ndim + j]) * (x[j] - codebook[i * ndim + j]);
+        }
+        if dist < min_dist {
+            min_dist = dist;
+            nearest = i;
+        }
+    }
+    nearest
 }
 
 fn find_nearest_weighted(
@@ -1491,6 +1525,78 @@ pub fn decode_lsps_scalar(lsp: &mut [f32], indexes: &[usize], order: usize) {
 
     for i in 0..order {
         lsp[i] = (PI as f32 / 4000.0) * lsp_hz[i];
+    }
+}
+
+/*---------------------------------------------------------------------------*\
+  FUNCTION....: encode_lsps_vq()
+  AUTHOR......: David Rowe
+  DATE CREATED: 15 Feb 2012
+  Multi-stage VQ LSP quantiser developed by Jean-Marc Valin.
+\*---------------------------------------------------------------------------*/
+
+pub fn encode_lsps_vq(indexes: &mut [usize], x: &mut [f32], xq: &mut [f32], order: usize) {
+    let mut err = vec![0f32; order];
+    let mut err2 = vec![0f32; order];
+    let mut err3 = vec![0f32; order];
+    let mut w = vec![0f32; order];
+    let mut w2 = vec![0f32; order];
+    let mut w3 = vec![0f32; order];
+    let codebook1 = lsp_cbjvm[0].cb;
+    let codebook2 = lsp_cbjvm[1].cb;
+    let codebook3 = lsp_cbjvm[2].cb;
+
+    w[0] = f32::min(x[0], x[1] - x[0]);
+    for i in 1..order - 1 {
+        w[i] = f32::min(x[i] - x[i - 1], x[i + 1] - x[i]);
+    }
+    w[order - 1] = f32::min(x[order - 1] - x[order - 2], PI as f32 - x[order - 1]);
+
+    compute_weights(x, &mut w, order);
+
+    let n1 = find_nearest(codebook1, lsp_cbjvm[0].m, x, order);
+
+    for i in 0..order {
+        xq[i] = codebook1[order * n1 + i];
+        err[i] = x[i] - xq[i];
+    }
+    for i in 0..order / 2 {
+        err2[i] = err[2 * i];
+        err3[i] = err[2 * i + 1];
+        w2[i] = w[2 * i];
+        w3[i] = w[2 * i + 1];
+    }
+    let n2 = find_nearest_weighted(codebook2, lsp_cbjvm[1].m, &mut err2, &w2, order / 2);
+    let n3 = find_nearest_weighted(codebook3, lsp_cbjvm[2].m, &mut err3, &w3, order / 2);
+
+    indexes[0] = n1;
+    indexes[1] = n2;
+    indexes[2] = n3;
+}
+
+/*---------------------------------------------------------------------------*\
+  FUNCTION....: decode_lsps_vq()
+  AUTHOR......: David Rowe
+  DATE CREATED: 15 Feb 2012
+\*---------------------------------------------------------------------------*/
+pub fn decode_lsps_vq(indexes: &[usize], xq: &mut [f32], order: usize, stages: usize) {
+    let codebook1: &[f32] = lsp_cbjvm[0].cb;
+    let codebook2: &[f32] = lsp_cbjvm[1].cb;
+    let codebook3: &[f32] = lsp_cbjvm[2].cb;
+
+    let n1 = indexes[0];
+    let n2 = indexes[1];
+    let n3 = indexes[2];
+
+    for i in 0..order {
+        xq[i] = codebook1[order * n1 + i];
+    }
+
+    if stages != 1 {
+        for i in 0..order / 2 {
+            xq[2 * i] += codebook2[order * n2 / 2 + i];
+            xq[2 * i + 1] += codebook3[order * n3 / 2 + i];
+        }
     }
 }
 

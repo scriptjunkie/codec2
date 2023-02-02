@@ -111,6 +111,9 @@ mod codebookd;
 use crate::codebookd::*;
 mod codebookge;
 use crate::codebookge::*;
+mod codebookjvm;
+use crate::codebookjvm::*;
+
 const WO_BITS: i32 = 7;
 const WO_E_BITS: u32 = 8;
 const LSPD_SCALAR_INDEXES: usize = 10;
@@ -210,6 +213,7 @@ mod inner {
     pub struct lsp_codebook {
         pub k: usize,           //  dimension of vector
         pub log2m: i32,         //  number of bits in m
+        pub m: usize,           // elements in codebook
         pub cb: &'static [f32], //  The elements
     }
     #[derive(Copy, Clone)]
@@ -720,7 +724,7 @@ pub enum Codec2Mode {
     MODE_1600,
     MODE_1400,
     MODE_1300,
-    //MODE_1200,
+    MODE_1200,
     //MODE_700C,
     //MODE_450,
     //MODE_450PWB,
@@ -800,7 +804,7 @@ impl Codec2 {
             MODE_1600 => 64,
             MODE_1400 => 56,
             MODE_1300 => 52,
-            // MODE_1200 => 48,
+            MODE_1200 => 48,
             // MODE_700C => 28,
             // MODE_450 => 18,
             // MODE_450PWB => 18,
@@ -811,7 +815,7 @@ impl Codec2 {
     pub fn samples_per_frame(&self) -> usize {
         match self.internal.mode {
             MODE_3200 | MODE_2400 => 160,
-            MODE_1600 | MODE_1400 | MODE_1300 /* | MODE_1200 | MODE_700C | MODE_450*/ => 320,
+            MODE_1600 | MODE_1400 | MODE_1300 | MODE_1200 /* | MODE_700C | MODE_450*/ => 320,
             //MODE_450PWB => 640,
         }
     }
@@ -825,6 +829,7 @@ impl Codec2 {
             MODE_1600 => self.codec2_encode_1600(bits, speech),
             MODE_1400 => self.codec2_encode_1400(bits, speech),
             MODE_1300 => self.codec2_encode_1300(bits, speech),
+            MODE_1200 => self.codec2_encode_1200(bits, speech),
         }
     }
 
@@ -837,6 +842,7 @@ impl Codec2 {
             MODE_1600 => self.codec2_decode_1600(speech, bits),
             MODE_1400 => self.codec2_decode_1400(speech, bits),
             MODE_1300 => self.codec2_decode_1300(speech, bits, 0.0),
+            MODE_1200 => self.codec2_decode_1200(speech, bits),
         }
     }
 
@@ -1812,6 +1818,227 @@ impl Codec2 {
         dump_ak_(&ak[3][0], LPC_ORD);
         #endif
         */
+
+        /* update memories for next frame ----------------------------*/
+
+        self.internal.prev_model_dec = model[3];
+        self.internal.prev_e_dec = e[3];
+        for i in 0..LPC_ORD {
+            self.internal.prev_lsps_dec[i] = lsps[3][i];
+        }
+    }
+
+    /*---------------------------------------------------------------------------*\
+      FUNCTION....: codec2_encode_1200
+      AUTHOR......: David Rowe, conversion by Raphael Peters
+      DATE CREATED: Nov 14 2011
+      Encodes 320 speech samples (40ms of speech) into 48 bits.
+      The codec2 algorithm actually operates internally on 10ms (80
+      sample) frames, so we run the encoding algorithm four times:
+      frame 0: voicing bit
+      frame 1: voicing bit, joint VQ of Wo and E
+      frame 2: voicing bit
+      frame 3: voicing bit, joint VQ of Wo and E, VQ LSPs
+      The bit allocation is:
+        Parameter                      frame 2  frame 4   Total
+        -------------------------------------------------------
+        Harmonic magnitudes (LSPs)      0       27        27
+        Energy+Wo                       8        8        16
+        Voicing (10ms update)           2        2         4
+        Spare                           0        1         1
+        TOTAL                          10       38        48
+    \*---------------------------------------------------------------------------*/
+    fn codec2_encode_1200(&mut self, bits: &mut [u8], speech: &[i16]) {
+        let mut model = MODEL::new(self.internal.c2const.p_max as f32);
+        let mut lsps = [0.0; LPC_ORD]; //f32
+        let mut lsps_ = [0.0; LPC_ORD]; //f32
+        let mut ak = [0.0; LPC_ORD + 1]; //f32
+        let mut lsp_indexes = [0; LPC_ORD];
+        let spare = 0;
+        let mut nbit = 0;
+
+        let nbyte = (self.bits_per_frame() + 7) / 8;
+        for i in 0..nbyte {
+            bits[i] = 0;
+        }
+
+        // frame 1: - voicing
+
+        self.analyse_one_frame(&mut model, speech);
+        pack(bits, &mut nbit, model.voiced, 1);
+
+        // frame 2: - voicing, joint Wo & E
+
+        self.analyse_one_frame(&mut model, &speech[self.internal.n_samp..]);
+        pack(bits, &mut nbit, model.voiced, 1);
+
+        // need to run this just to get LPC energy
+        let e = speech_to_uq_lsps(
+            &mut lsps,
+            &mut ak,
+            &self.internal.Sn,
+            &self.internal.w,
+            self.internal.m_pitch,
+            LPC_ORD,
+        );
+
+        let WoE_index = encode_WoE(&model, e, &mut self.internal.xq_enc);
+        pack(bits, &mut nbit, WoE_index, WO_E_BITS);
+
+        // frame 3: - voicing
+
+        self.analyse_one_frame(&mut model, &speech[2 * self.internal.n_samp..]);
+        pack(bits, &mut nbit, model.voiced, 1);
+
+        // frame 4: - voicing, joint Wo & E, scalar LSPs
+
+        self.analyse_one_frame(&mut model, &speech[3 * self.internal.n_samp..]);
+        pack(bits, &mut nbit, model.voiced, 1);
+
+        let e = speech_to_uq_lsps(
+            &mut lsps,
+            &mut ak,
+            &self.internal.Sn,
+            &self.internal.w,
+            self.internal.m_pitch,
+            LPC_ORD,
+        );
+        let WoE_index = encode_WoE(&model, e, &mut self.internal.xq_enc);
+        pack(bits, &mut nbit, WoE_index, WO_E_BITS);
+
+        encode_lsps_vq(&mut lsp_indexes, &mut lsps, &mut lsps_, LPC_ORD);
+        for i in 0..LSP_PRED_VQ_INDEXES {
+            pack(
+                bits,
+                &mut nbit,
+                lsp_indexes[i] as i32,
+                lsp_pred_vq_bits(i) as u32,
+            );
+        }
+        pack(bits, &mut nbit, spare, 1);
+
+        assert_eq!(nbit, self.bits_per_frame());
+    }
+
+    /*---------------------------------------------------------------------------*\
+      FUNCTION....: codec2_decode_1200
+      AUTHOR......: David Rowe, conversion by Raphael Peters
+      DATE CREATED: 14 Feb 2012
+      Decodes frames of 48 bits into 320 samples (40ms) of speech.
+    \*---------------------------------------------------------------------------*/
+
+    fn codec2_decode_1200(&mut self, speech: &mut [i16], bits: &[u8]) {
+        let mut model = [MODEL::new(self.internal.c2const.p_max as f32); 4];
+        let mut lsp_indexes = [0; LPC_ORD];
+        let mut lsps = [[0.0; LPC_ORD]; 4];
+        let mut e = [0.0; 4];
+        let mut snr = 0.0;
+        let mut ak = [[0.0; LPC_ORD + 1]; 4];
+        let mut nbit = 0;
+        let mut Aw = [COMP::new(); FFT_ENC];
+        // only need to zero these out due to (unused) snr calculation
+
+        for i in 0..4 {
+            for j in 1..MAX_AMP {
+                model[i].A[j] = 0.0;
+            }
+        }
+
+        /* unpack bits from channel ------------------------------------*/
+
+        /* this will partially fill the model params for the 4 x 10ms
+        frames */
+
+        model[0].voiced = unpack(bits, &mut nbit, 1);
+
+        model[1].voiced = unpack(bits, &mut nbit, 1);
+        let WoE_index = unpack(bits, &mut nbit, WO_E_BITS);
+        decode_WoE(
+            &self.internal.c2const,
+            &mut model[1],
+            &mut e[1],
+            &mut self.internal.xq_dec,
+            WoE_index as usize,
+        );
+
+        model[2].voiced = unpack(bits, &mut nbit, 1);
+
+        model[3].voiced = unpack(bits, &mut nbit, 1);
+        let WoE_index = unpack(bits, &mut nbit, WO_E_BITS);
+        decode_WoE(
+            &self.internal.c2const,
+            &mut model[3],
+            &mut e[3],
+            &mut self.internal.xq_dec,
+            WoE_index as usize,
+        );
+
+        for i in 0..LSP_PRED_VQ_INDEXES {
+            lsp_indexes[i] = unpack(bits, &mut nbit, lsp_pred_vq_bits(i) as u32) as usize;
+        }
+        decode_lsps_vq(&lsp_indexes, &mut lsps[3][0..], LPC_ORD, 0);
+        check_lsp_order(&mut lsps[3][0..], LPC_ORD);
+        bw_expand_lsps(&mut lsps[3][0..], LPC_ORD, 50.0, 100.0);
+
+        // interpolate
+
+        /* Wo and energy are sampled every 20ms, so we interpolate just 1
+        10ms frame between 20ms samples */
+
+        model[0] = interp_Wo(
+            &model[0],
+            &self.internal.prev_model_dec,
+            &model[1],
+            self.internal.c2const.Wo_min,
+        );
+        e[0] = interp_energy(self.internal.prev_e_dec, e[1]);
+        model[2] = interp_Wo(
+            &model[2],
+            &model[1],
+            &model[3],
+            self.internal.c2const.Wo_min,
+        );
+        e[2] = interp_energy(e[1], e[3]);
+
+        /* LSPs are sampled every 40ms so we interpolate the 3 frames in
+        between, then recover spectral amplitudes */
+
+        for i in 0..3 {
+            let weight = 0.25 + i as f32 * 0.25;
+            let lsps3 = lsps[3];
+            interpolate_lsp_ver2(
+                &mut lsps[i][0..],
+                &self.internal.prev_lsps_dec,
+                &lsps3[0..],
+                weight,
+                LPC_ORD,
+            );
+        }
+        for i in 0..4 {
+            lsp_to_lpc(&lsps[i][0..], &mut ak[i][0..], LPC_ORD);
+            aks_to_M2(
+                &mut self.internal.fftr_fwd_cfg,
+                &ak[i][0..],
+                LPC_ORD,
+                &mut model[i],
+                e[i],
+                &mut snr,
+                0,
+                0,
+                self.internal.lpc_pf,
+                self.internal.bass_boost,
+                self.internal.beta,
+                self.internal.gamma,
+                &mut Aw,
+            );
+            apply_lpc_correction(&mut model[i]);
+            self.synthesise_one_frame(
+                &mut speech[self.internal.n_samp * i..],
+                &mut model[i],
+                &Aw,
+                1.0,
+            );
+        }
 
         /* update memories for next frame ----------------------------*/
 
