@@ -4,7 +4,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-codec2 = "0.2"
+codec2 = "0.3"
 ```
 
 ## Usage
