@@ -1,6 +1,6 @@
 use crate::*;
 use core::sync::atomic;
-#[cfg(micromath)]
+#[cfg(feature = "micromath")]
 #[allow(unused_imports)]
 use micromath::F32Ext;
 

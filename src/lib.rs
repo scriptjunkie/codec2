@@ -59,11 +59,11 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![warn(trivial_numeric_casts)]
-#![cfg_attr(micromath, no_std)]
+#![cfg_attr(feature = "micromath", no_std)]
 
 extern crate alloc;
 use alloc::{vec, vec::Vec};
-#[cfg(micromath)]
+#[cfg(feature = "micromath")]
 #[allow(unused_imports)]
 use micromath::F32Ext;
 
