@@ -1,4 +1,9 @@
 use crate::*;
+use core::sync::atomic;
+#[cfg(feature = "micromath")]
+#[allow(unused_imports)]
+use micromath::F32Ext;
+
 const LSP_DELTA1: f32 = 0.01;
 const E_MIN_DB: f32 = -10.0;
 const E_MAX_DB: f32 = 40.0;
@@ -291,7 +296,7 @@ pub fn encode_WoE(model: &MODEL, mut e: f32, xq: &mut [f32]) -> i32 {
     } /* occasional small negative energies due LPC round off I guess */
 
     let mut x = [0.0, 0.0];
-    x[0] = ((model.Wo / PI as f32) * 4000.0 / 50.0).log10() / 2.0_f32.log10();
+    x[0] = ((model.Wo / PI) * 4000.0 / 50.0).log10() / 2.0_f32.log10();
     x[1] = 10.0 * (1e-4 + e).log10();
 
     compute_weights2(&x, xq, &mut w);
@@ -355,7 +360,7 @@ fn compute_weights(x: &[f32], w: &mut [f32], ndim: usize) {
     for i in 1..ndim - 1 {
         w[i] = f32::min(x[i] - x[i - 1], x[i + 1] - x[i]);
     }
-    w[ndim - 1] = f32::min(x[ndim - 1] - x[ndim - 2], PI as f32 - x[ndim - 1]);
+    w[ndim - 1] = f32::min(x[ndim - 1] - x[ndim - 2], PI - x[ndim - 1]);
 
     for i in 0..ndim {
         w[i] = 1. / (0.01 + w[i]);
@@ -420,7 +425,7 @@ pub fn encode_lsps_scalar(indexes: &mut [i32], lsp: &[f32], order: usize) {
     frequencies */
 
     for i in 0..order {
-        lsp_hz[i] = (4000.0 / PI as f32) * lsp[i];
+        lsp_hz[i] = (4000.0 / PI) * lsp[i];
     }
     /* scalar quantisers */
 
@@ -481,7 +486,7 @@ pub fn speech_to_uq_lsps(
 
     if e == 0.0 {
         for i in 0..order {
-            lsp[i] = (PI as f32 / order as f32) * (i as f32);
+            lsp[i] = (PI / order as f32) * (i as f32);
         }
         return 0.0;
     }
@@ -506,7 +511,7 @@ pub fn speech_to_uq_lsps(
     if roots != order as i32 {
         //  if root finding fails use some benign LSP values instead
         for i in 0..order {
-            lsp[i] = (PI as f32 / order as f32) * (i as f32);
+            lsp[i] = (PI / order as f32) * (i as f32);
         }
     }
 
@@ -574,7 +579,7 @@ pub fn encode_lspds_scalar(indexes: &mut [i32], lsp: &[f32], order: usize) {
     //  convert from radians to Hz so we can use human readable frequencies
 
     for i in 0..order {
-        lsp_hz[i] = (4000.0 / PI as f32) * lsp[i];
+        lsp_hz[i] = (4000.0 / PI) * lsp[i];
     }
     wt[0] = 1.0;
     for i in 0..order {
@@ -980,12 +985,12 @@ pub fn phase_synth_zero_order(
 const CODEC2_RAND_MAX: f32 = 32767.0;
 
 //  todo: this should probably be in some states rather than a static
-static next_rand: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+static next_rand: atomic::AtomicUsize = atomic::AtomicUsize::new(1);
 fn codec2_rand() -> f32 {
     // next = next * 1103515245 + 12345 but allow overflow and allow thready accesses.
-    let mut nextr = next_rand.load(std::sync::atomic::Ordering::Relaxed);
+    let mut nextr = next_rand.load(atomic::Ordering::Relaxed);
     nextr = nextr.overflowing_mul(1103515245).0.overflowing_add(12345).0;
-    next_rand.store(nextr, std::sync::atomic::Ordering::Relaxed);
+    next_rand.store(nextr, atomic::Ordering::Relaxed);
     ((nextr / 65536) % 32768) as f32
 }
 
@@ -1175,7 +1180,7 @@ pub fn interp_Wo2(
     } else {
         interp.Wo = Wo_min;
     }
-    interp.L = (PI / interp.Wo as f64) as usize;
+    interp.L = (PI / interp.Wo) as usize;
     interp
 }
 
@@ -1211,7 +1216,7 @@ pub fn interpolate_lsp_ver2(
 
 \*---------------------------------------------------------------------------*/
 pub fn apply_lpc_correction(model: &mut MODEL) {
-    if model.Wo < (PI as f32 * 150.0 / 4000.0) {
+    if model.Wo < (PI * 150.0 / 4000.0) {
         model.A[1] *= 0.032;
     }
 }
@@ -1229,7 +1234,7 @@ pub fn decode_lspds_scalar(lsp_: &mut [f32], indexes: &[usize], order: usize) {
         } else {
             lsp__hz[0] = dlsp_[0];
         }
-        lsp_[i] = (PI as f32 / 4000.0) * lsp__hz[i];
+        lsp_[i] = (PI / 4000.0) * lsp__hz[i];
     }
 }
 
@@ -1467,8 +1472,8 @@ pub fn postfilter(model: &mut MODEL, bg_est: &mut f32) {
 
 pub fn bw_expand_lsps(lsp: &mut [f32], order: usize, min_sep_low: f32, min_sep_high: f32) {
     for i in 1..4 {
-        if (lsp[i] - lsp[i - 1]) < min_sep_low * (PI as f32 / 4000.0) {
-            lsp[i] = lsp[i - 1] + min_sep_low * (PI as f32 / 4000.0);
+        if (lsp[i] - lsp[i - 1]) < min_sep_low * (PI / 4000.0) {
+            lsp[i] = lsp[i - 1] + min_sep_low * (PI / 4000.0);
         }
     }
 
@@ -1478,8 +1483,8 @@ pub fn bw_expand_lsps(lsp: &mut [f32], order: usize, min_sep_low: f32, min_sep_h
     */
 
     for i in 4..order {
-        if lsp[i] - lsp[i - 1] < min_sep_high * (PI as f32 / 4000.0) {
-            lsp[i] = lsp[i - 1] + min_sep_high * (PI as f32 / 4000.0);
+        if lsp[i] - lsp[i - 1] < min_sep_high * (PI / 4000.0) {
+            lsp[i] = lsp[i - 1] + min_sep_high * (PI / 4000.0);
         }
     }
 }
@@ -1524,7 +1529,7 @@ pub fn decode_lsps_scalar(lsp: &mut [f32], indexes: &[usize], order: usize) {
     /* convert back to radians */
 
     for i in 0..order {
-        lsp[i] = (PI as f32 / 4000.0) * lsp_hz[i];
+        lsp[i] = (PI / 4000.0) * lsp_hz[i];
     }
 }
 
@@ -1550,7 +1555,7 @@ pub fn encode_lsps_vq(indexes: &mut [usize], x: &mut [f32], xq: &mut [f32], orde
     for i in 1..order - 1 {
         w[i] = f32::min(x[i] - x[i - 1], x[i + 1] - x[i]);
     }
-    w[order - 1] = f32::min(x[order - 1] - x[order - 2], PI as f32 - x[order - 1]);
+    w[order - 1] = f32::min(x[order - 1] - x[order - 2], PI - x[order - 1]);
 
     compute_weights(x, &mut w, order);
 
@@ -1622,7 +1627,7 @@ pub fn decode_WoE(c2const: &C2const, model: &mut MODEL, e: &mut f32, xq: &mut [f
     }
 
     //printf("dec: %f %f\n", xq[0], xq[1]);
-    model.Wo = 2.0_f32.powf(xq[0]) * (PI as f32 * 50.0) / 4000.0;
+    model.Wo = 2.0_f32.powf(xq[0]) * (PI * 50.0) / 4000.0;
 
     /* bit errors can make us go out of range leading to all sorts of
     probs like seg faults */
@@ -1634,7 +1639,7 @@ pub fn decode_WoE(c2const: &C2const, model: &mut MODEL, e: &mut f32, xq: &mut [f
         model.Wo = Wo_min
     };
 
-    model.L = (PI / model.Wo as f64) as usize; // if we quantise Wo re-compute L
+    model.L = (PI / model.Wo) as usize; // if we quantise Wo re-compute L
 
     *e = 10.0_f32.powf(xq[1] / 10.0);
 }

@@ -59,9 +59,20 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![warn(trivial_numeric_casts)]
+#![cfg_attr(feature = "micromath", no_std)]
+
+extern crate alloc;
+use alloc::{vec, vec::Vec};
+#[cfg(feature = "micromath")]
+#[allow(unused_imports)]
+use micromath::F32Ext;
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+    use super::*;
+    use std::*;
+
     #[test]
     fn encode_test() {
         let mut c2 = crate::Codec2::new(crate::Codec2Mode::MODE_3200);
@@ -118,7 +129,7 @@ const WO_BITS: i32 = 7;
 const WO_E_BITS: u32 = 8;
 const LSPD_SCALAR_INDEXES: usize = 10;
 const LSP_SCALAR_INDEXES: usize = 10;
-use std::f64::consts::PI;
+use core::f32::consts::PI;
 
 const N_S: f32 = 0.01; //  internal proc frame length in secs
 const TW_S: f32 = 0.005; //  trapezoidal synth window overlap
@@ -134,6 +145,8 @@ const P_MIN_S: f32 = 0.0025; //  minimum pitch period in s
 const P_MAX_S: f32 = 0.0200; //  maximum pitch period in s
 mod inner {
     use crate::*;
+    use core::fmt;
+
     #[derive(Clone, Debug)]
     pub struct C2const {
         pub Fs: i32,       //  sample rate of this instance
@@ -225,15 +238,15 @@ mod inner {
         pub fn new() -> Self {
             Self { r: 0.0, i: 0.0 }
         }
-        pub fn kf_cexp(phase: f64) -> Self {
+        pub fn kf_cexp(phase: f32) -> Self {
             Self {
-                r: phase.cos() as f32,
-                i: phase.sin() as f32,
+                r: phase.cos(),
+                i: phase.sin(),
             }
         }
     }
-    impl std::fmt::Debug for kiss_fft_cpx {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl fmt::Debug for kiss_fft_cpx {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_fmt(format_args!("{},{}", self.r, self.i))
         }
     }
@@ -250,7 +263,7 @@ mod inner {
             let mut twiddles = Vec::with_capacity(nfft);
             let mut factors = [0; 2 * MAXFACTORS];
             for i in 0..nfft {
-                let mut phase = -2.0 * PI * (i as f64) / (nfft as f64);
+                let mut phase = -2.0 * PI * (i as f32) / (nfft as f32);
                 if inverse_fft != 0 {
                     phase *= -1.0;
                 }
@@ -258,7 +271,7 @@ mod inner {
             }
             let mut n = nfft;
             let mut p = 4;
-            let floor_sqrt = (n as f64).sqrt().floor() as usize;
+            let floor_sqrt = (n as f32).sqrt().floor() as usize;
             let mut idx = 0;
             // factor out powers of 4, powers of 2, then any remaining primes
             loop {
@@ -305,7 +318,7 @@ mod inner {
             };
             for i in 0..nfft / 2 {
                 let mut phase =
-                    -3.14159265358979323846264338327 * ((i as f64 + 1.0) / nfft as f64 + 0.5);
+                    -3.14159265358979323846264338327 * ((i as f32 + 1.0) / nfft as f32 + 0.5);
                 if inverse_fft != 0 {
                     phase *= -1.0;
                 }
@@ -339,8 +352,7 @@ mod inner {
             };
             let mut w = [0.0; PMAX_M / DEC];
             for i in 0..m / DEC {
-                w[i] =
-                    0.5 - 0.5 * (2.0 * PI as f32 * i as f32 / (m as f32 / DEC as f32 - 1.0)).cos();
+                w[i] = 0.5 - 0.5 * (2.0 * PI * i as f32 / (m as f32 / DEC as f32 - 1.0)).cos();
             }
             Self {
                 Fs: c2const.Fs, //  sample rate in Hz
@@ -367,11 +379,11 @@ mod inner {
         pub fn new(p_max: f32) -> Self {
             let wo = TWO_PI / p_max;
             Self {
-                Wo: wo,                               //  fundamental frequency estimate in radians
-                L: (PI / wo as f64).floor() as usize, //  number of harmonics
-                A: [0.0; MAX_AMP + 1],                //  amplitiude of each harmonic
-                phi: [0.0; MAX_AMP + 1],              //  phase of each harmonic
-                voiced: 0,                            //  non-zero if this frame is voiced
+                Wo: wo,                        //  fundamental frequency estimate in radians
+                L: (PI / wo).floor() as usize, //  number of harmonics
+                A: [0.0; MAX_AMP + 1],         //  amplitiude of each harmonic
+                phi: [0.0; MAX_AMP + 1],       //  phase of each harmonic
+                voiced: 0,                     //  non-zero if this frame is voiced
             }
         }
     }
@@ -784,7 +796,7 @@ impl Codec2 {
             },
         };
         for i in 0..LPC_ORD {
-            c2.internal.prev_lsps_dec[i] = (i as f64 * PI / (LPC_ORD as f64 + 1.0)) as f32;
+            c2.internal.prev_lsps_dec[i] = i as f32 * PI / (LPC_ORD as f32 + 1.0);
         }
         make_analysis_window(
             &c2.internal.c2const,
@@ -938,7 +950,7 @@ impl Codec2 {
 
         let Wo_index = unpack(bits, &mut nbit, WO_BITS as u32);
         model[1].Wo = decode_Wo(&self.internal.c2const, Wo_index, WO_BITS);
-        model[1].L = (PI / model[1].Wo as f64) as usize;
+        model[1].L = (PI / model[1].Wo) as usize;
 
         let mut e = [0.0; 2];
         let e_index = unpack(bits, &mut nbit, E_BITS as u32);
@@ -1303,7 +1315,7 @@ impl Codec2 {
         model[1].voiced = unpack(bits, &mut nbit, 1);
         let Wo_index = unpack(bits, &mut nbit, WO_BITS as u32);
         model[1].Wo = decode_Wo(&self.internal.c2const, Wo_index, WO_BITS);
-        model[1].L = (PI as f32 / model[1].Wo) as usize;
+        model[1].L = (PI / model[1].Wo) as usize;
 
         let mut e_index = unpack(bits, &mut nbit, E_BITS as u32);
         e[1] = decode_energy(e_index, E_BITS);
@@ -1313,7 +1325,7 @@ impl Codec2 {
         model[3].voiced = unpack(bits, &mut nbit, 1);
         let Wo_index = unpack(bits, &mut nbit, WO_BITS as u32);
         model[3].Wo = decode_Wo(&self.internal.c2const, Wo_index, WO_BITS);
-        model[3].L = (PI as f32 / model[3].Wo) as usize;
+        model[3].L = (PI / model[3].Wo) as usize;
 
         e_index = unpack(bits, &mut nbit, E_BITS as u32);
         e[3] = decode_energy(e_index, E_BITS);
@@ -1719,7 +1731,7 @@ impl Codec2 {
         let Wo_index =
             unpack_natural_or_gray(bits, &mut nbit, WO_BITS as u32, self.internal.gray as u32);
         model[3].Wo = decode_Wo(&self.internal.c2const, Wo_index, WO_BITS);
-        model[3].L = (PI as f32 / model[3].Wo) as usize;
+        model[3].L = (PI / model[3].Wo) as usize;
 
         let e_index =
             unpack_natural_or_gray(bits, &mut nbit, E_BITS as u32, self.internal.gray as u32);
@@ -2090,7 +2102,7 @@ impl Codec2 {
             &mut self.internal.prev_f0_enc,
         );
         model.Wo = TWO_PI / pitch;
-        model.L = (PI / model.Wo as f64) as usize;
+        model.L = (PI / model.Wo) as usize;
 
         //  estimate model parameters
         two_stage_pitch_refinement(&self.internal.c2const, model, &Sw);
@@ -2376,10 +2388,10 @@ fn two_stage_pitch_refinement(c2const: &C2const, model: &mut MODEL, Sw: &[COMP])
         model.Wo = TWO_PI / (c2const.p_min as f32);
     }
 
-    model.L = (PI / model.Wo as f64).floor() as usize;
+    model.L = (PI / model.Wo).floor() as usize;
 
     //  trap occasional round off issues with floorf()
-    if model.Wo * model.L as f32 >= 0.95 * PI as f32 {
+    if model.Wo * model.L as f32 >= 0.95 * PI {
         model.L -= 1;
     }
     //  assert(model.Wo*model.L < PI);
@@ -2404,7 +2416,7 @@ fn two_stage_pitch_refinement(c2const: &C2const, model: &mut MODEL, Sw: &[COMP])
 fn hs_pitch_refinement(model: &mut MODEL, Sw: &[COMP], pmin: f32, pmax: f32, pstep: f32) {
     //  Initialisation
 
-    model.L = (PI / model.Wo as f64) as usize; //  use initial pitch est. for L
+    model.L = (PI / model.Wo) as usize; //  use initial pitch est. for L
     let mut Wom = model.Wo; // Wo that maximises E
     let mut Em = 0.0; // mamimum energy
     let r = TWO_PI / FFT_ENC as f32; // number of rads/bin
